@@ -6,7 +6,9 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 KST = ZoneInfo('Asia/Seoul')
-TOKEN = os.environ['DISCORD_TOKEN']
+TOKEN = os.getenv('DISCORD_TOKEN', '').strip()
+if not TOKEN:
+    raise RuntimeError('DISCORD_TOKEN 환경변수가 없습니다. Railway 서비스 Variables에 등록하고 배포하세요.')
 DB_PATH = os.getenv('DB_PATH', 'activity.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0'))
 REPORT_CHANNEL_ID = int(os.getenv('REPORT_CHANNEL_ID', '0'))
@@ -18,7 +20,15 @@ intents.members = True
 intents.voice_states = True
 intents.messages = True
 bot = commands.Bot(command_prefix='!', intents=intents)
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+try:
+    os.makedirs(db_dir, exist_ok=True)
+except OSError as exc:
+    raise RuntimeError(f'DB 폴더 생성 실패: {db_dir}. Railway Volume을 /data에 연결하거나 DB_PATH=/tmp/activity.db로 테스트하세요.') from exc
+try:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+except sqlite3.OperationalError as exc:
+    raise RuntimeError(f'DB 열기 실패: {DB_PATH}. Volume 마운트와 쓰기 권한을 확인하세요.') from exc
 conn.execute('PRAGMA journal_mode=WAL')
 conn.executescript('''CREATE TABLE IF NOT EXISTS voice_sessions(guild_id INTEGER,user_id INTEGER,channel_id INTEGER,channel_name TEXT,start REAL,PRIMARY KEY(guild_id,user_id));
 CREATE TABLE IF NOT EXISTS voice_segments(guild_id INTEGER,user_id INTEGER,channel_id INTEGER,channel_name TEXT,start REAL,end REAL);
@@ -91,6 +101,8 @@ async def on_ready():
     t=now()
     for guild in bot.guilds:
         # Recover live sessions after downtime; offline intervals are not recoverable.
+        # 이전 세션을 재시작 시점까지 인정하지 않음: 다운타임은 계산할 수 없음.
+        # 마지막 관측 시각까지 보존하려면 주기적 체크포인트가 필요함.
         conn.execute('DELETE FROM voice_sessions WHERE guild_id=?',(guild.id,))
         for channel in guild.voice_channels:
             for member in channel.members:
